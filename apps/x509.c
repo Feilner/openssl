@@ -33,13 +33,16 @@
 #define DEF_DAYS        30
 
 static int callb(int ok, X509_STORE_CTX *ctx);
-static int sign(X509 *x, EVP_PKEY *pkey, int days, int clrext,
+static int sign(X509 *x, EVP_PKEY *pkey, const char *setstartdate,
+                const char *setenddate, int days, int clrext,
                 const EVP_MD *digest, CONF *conf, const char *section,
                 int preserve_dates);
 static int x509_certify(X509_STORE *ctx, const char *CAfile, const EVP_MD *digest,
                         X509 *x, X509 *xca, EVP_PKEY *pkey,
                         STACK_OF(OPENSSL_STRING) *sigopts, const char *serialfile,
-                        int create, int days, int clrext, CONF *conf,
+                        int create,  const char *setstartdate,
+                        const char *setenddate, int days, 
+                        int clrext, CONF *conf,
                         const char *section, ASN1_INTEGER *sno, int reqfile,
                         int preserve_dates);
 static int purpose_print(BIO *bio, X509 *cert, X509_PURPOSE *pt);
@@ -61,7 +64,7 @@ typedef enum OPTION_choice {
     OPT_SUBJECT_HASH_OLD,
     OPT_ISSUER_HASH_OLD,
     OPT_BADSIG, OPT_MD, OPT_ENGINE, OPT_NOCERT, OPT_PRESERVE_DATES,
-    OPT_R_ENUM, OPT_EXT
+    OPT_R_ENUM, OPT_EXT, OPT_SETSTARTDATE, OPT_SETENDDATE
 } OPTION_CHOICE;
 
 const OPTIONS x509_options[] = {
@@ -148,6 +151,9 @@ const OPTIONS x509_options[] = {
     {"engine", OPT_ENGINE, 's', "Use engine, possibly a hardware device"},
 #endif
     {"preserve_dates", OPT_PRESERVE_DATES, '-', "preserve existing dates when signing"},
+    {"setstartdate", OPT_SETSTARTDATE, 's', "Cert notBefore, YYMMDDHHMMSSZ"},
+    {"setenddate", OPT_SETENDDATE, 's',
+     "YYMMDDHHMMSSZ cert notAfter (overrides -days)"},
     {NULL}
 };
 
@@ -182,6 +188,7 @@ int x509_main(int argc, char **argv)
     time_t checkoffset = 0;
     unsigned long certflag = 0;
     int preserve_dates = 0;
+    char *setstartdate = NULL, *setenddate = NULL;
     OPTION_CHOICE o;
     ENGINE *e = NULL;
 #ifndef OPENSSL_NO_MD5
@@ -240,6 +247,12 @@ int x509_main(int argc, char **argv)
                 sigopts = sk_OPENSSL_STRING_new_null();
             if (!sigopts || !sk_OPENSSL_STRING_push(sigopts, opt_arg()))
                 goto opthelp;
+            break;
+        case OPT_SETSTARTDATE:
+            setstartdate = opt_arg();
+            break;
+        case OPT_SETENDDATE:
+            setenddate = opt_arg();
             break;
         case OPT_DAYS:
             if (preserve_dates)
@@ -531,6 +544,23 @@ int x509_main(int argc, char **argv)
             goto end;
         }
 
+        if (setstartdate != NULL && !ASN1_TIME_set_string_X509(NULL, setstartdate)) {
+            BIO_printf(bio_err,
+                       "start date is invalid, it should be YYMMDDHHMMSSZ or YYYYMMDDHHMMSSZ\n");
+            goto end;
+        }
+
+        if (setenddate != NULL && !ASN1_TIME_set_string_X509(NULL, setenddate)) {
+            BIO_printf(bio_err,
+                       "end date is invalid, it should be YYMMDDHHMMSSZ or YYYYMMDDHHMMSSZ\n");
+            goto end;
+        }
+
+        if (setenddate != NULL)
+        {
+            days = 0;
+        }
+
         if ((pkey = X509_REQ_get0_pubkey(req)) == NULL) {
             BIO_printf(bio_err, "error unpacking public key\n");
             goto end;
@@ -571,7 +601,8 @@ int x509_main(int argc, char **argv)
             goto end;
         if (!X509_set_subject_name(x, X509_REQ_get_subject_name(req)))
             goto end;
-        if (!set_cert_times(x, NULL, NULL, days))
+
+        if (!set_cert_times(x, setstartdate, setenddate, days))
             goto end;
 
         if (fkey != NULL) {
@@ -799,7 +830,7 @@ int x509_main(int argc, char **argv)
                         goto end;
                 }
 
-                if (!sign(x, Upkey, days, clrext, digest, extconf, extsect, preserve_dates))
+                if (!sign(x, Upkey, setstartdate, setenddate, days, clrext, digest, extconf, extsect, preserve_dates))
                     goto end;
             } else if (CA_flag == i) {
                 BIO_printf(bio_err, "Getting CA Private Key\n");
@@ -812,7 +843,7 @@ int x509_main(int argc, char **argv)
 
                 if (!x509_certify(ctx, CAfile, digest, x, xca,
                                   CApkey, sigopts,
-                                  CAserial, CA_createserial, days, clrext,
+                                  CAserial, CA_createserial, setstartdate, setenddate, days, clrext,
                                   extconf, extsect, sno, reqfile, preserve_dates))
                     goto end;
             } else if (x509req == i) {
@@ -947,7 +978,8 @@ static int x509_certify(X509_STORE *ctx, const char *CAfile, const EVP_MD *diges
                         X509 *x, X509 *xca, EVP_PKEY *pkey,
                         STACK_OF(OPENSSL_STRING) *sigopts,
                         const char *serialfile, int create,
-                        int days, int clrext, CONF *conf, const char *section,
+                        const char *setstartdate, const char *setenddate, int days, 
+                        int clrext, CONF *conf, const char *section,
                         ASN1_INTEGER *sno, int reqfile, int preserve_dates)
 {
     int ret = 0;
@@ -992,7 +1024,7 @@ static int x509_certify(X509_STORE *ctx, const char *CAfile, const EVP_MD *diges
     if (!X509_set_serialNumber(x, bs))
         goto end;
 
-    if (!preserve_dates && !set_cert_times(x, NULL, NULL, days))
+    if (!preserve_dates && !set_cert_times(x, setstartdate, setenddate, days))
         goto end;
 
     if (clrext) {
@@ -1055,14 +1087,14 @@ static int callb(int ok, X509_STORE_CTX *ctx)
 }
 
 /* self sign */
-static int sign(X509 *x, EVP_PKEY *pkey, int days, int clrext,
+static int sign(X509 *x, EVP_PKEY *pkey, const char *setstartdate, const char *setenddate, int days, int clrext,
                 const EVP_MD *digest, CONF *conf, const char *section,
                 int preserve_dates)
 {
 
     if (!X509_set_issuer_name(x, X509_get_subject_name(x)))
         goto err;
-    if (!preserve_dates && !set_cert_times(x, NULL, NULL, days))
+    if (!preserve_dates && !set_cert_times(x, setstartdate, setenddate, days))
         goto err;
     if (!X509_set_pubkey(x, pkey))
         goto err;
